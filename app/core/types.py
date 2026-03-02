@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional
 Severity = Literal["low", "medium", "high"]
 Effort = Literal["low", "medium", "high"]
 Risk = Literal["low", "medium", "high"]
+Confidence = Literal["low", "medium", "high"]
 
 @dataclass
 class RunContext:
@@ -12,6 +13,13 @@ class RunContext:
     account_id: Optional[str]
     days: int
     regions: list[str]
+    edp_percent: float
+    athena_database: str
+    athena_table: str
+    athena_workgroup: str
+    athena_output_s3: str
+    athena_profile_name: str | None = None
+    athena_region: str = "us-east-1"
     requested_by: str | None = None
 
 @dataclass
@@ -31,7 +39,12 @@ class Finding:
     effort: Effort
     risk: Risk
     recommendation: str
+    confidence: Confidence
     est_monthly_savings_usd: float | None
+    est_monthly_savings_gross_usd: float | None
+    est_monthly_savings_net_usd: float | None
+    est_annual_savings_gross_usd: float | None
+    est_annual_savings_net_usd: float | None
     evidence: list[Evidence]
 
     def to_dict(self) -> dict:
