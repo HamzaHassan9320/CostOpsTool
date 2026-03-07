@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import streamlit as st
@@ -15,29 +16,59 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.auth.validation import validate_profile
 from app.core.registry import run_action
-from app.core.types import ActionRequest, Finding, RunContext
+from app.core.types import ActionRequest, RunContext
+from app.llm.router import route
+from app.memory.store import ProjectMemory, get_project, list_projects, upsert_project
 from app.outputs.excel_writer import write_excel
-from app.outputs.report_builder import findings_to_rows
+from app.outputs.report_builder import recommendations_to_rows
 
-# IMPORTANT: ensure plugins register
-import app.services.aws_config.plugin  # noqa: F401
+# IMPORTANT: ensure plugin registers
+import app.services.nat.plugin  # noqa: F401
 
-STEP_VALIDATE_PROFILE = "validate_profile"
-STEP_ASK_CUR_DATABASE = "ask_cur_database"
-STEP_ASK_CUR_TABLE = "ask_cur_table"
-STEP_ASK_CUR_WORKGROUP = "ask_cur_workgroup"
-STEP_ASK_CUR_OUTPUT_S3 = "ask_cur_output_s3"
-STEP_ASK_CUR_PROFILE = "ask_cur_profile"
-STEP_ASK_CUR_REGION = "ask_cur_region"
-STEP_ASK_EDP = "ask_edp"
-STEP_RUN_SCAN = "run_scan"
-STEP_SHOW_OPPORTUNITIES = "show_opportunities"
-STEP_CHOOSE_FOR_EXCEL = "choose_for_excel"
-STEP_DOWNLOAD = "download"
+ACTION_ID = "optimization.run_scan"
 
-DEFAULT_ACTION = "aws_config.savings_scan"
-ACTION_REQUIREMENTS = {
-    DEFAULT_ACTION: {"needs_cur": True},
+STAGE_AWAIT_INTENT = "await_intent"
+STAGE_AWAIT_PROFILE = "await_profile"
+STAGE_VALIDATING_PROFILE = "validating_profile"
+STAGE_AWAIT_PROJECT_SELECTION = "await_project_selection"
+STAGE_AWAIT_CUR_FIELDS = "await_cur_fields"
+STAGE_RUNNING_SCAN = "running_scan"
+STAGE_READY_WITH_RESULTS = "ready_with_results"
+
+CUR_FIELDS_ALL = [
+    "athena_database",
+    "athena_table",
+    "athena_workgroup",
+    "athena_output_s3",
+    "athena_profile_name",
+    "athena_region",
+]
+CUR_FIELDS_REQUIRED = [
+    "athena_database",
+    "athena_table",
+    "athena_workgroup",
+    "athena_output_s3",
+    "athena_profile_name",
+]
+CUR_FIELD_PROMPTS = {
+    "athena_database": "Enter Athena CUR database name (or type 'skip' to skip CUR pricing).",
+    "athena_table": "Enter Athena CUR table name.",
+    "athena_workgroup": "Enter Athena workgroup (default: primary).",
+    "athena_output_s3": "Enter Athena output S3 path (s3://bucket/prefix).",
+    "athena_profile_name": (
+        "Enter CUR query profile name for the account that has Athena/CUR "
+        "(often management/payer), or type 'same' for the validated profile."
+    ),
+    "athena_region": "Enter CUR Athena region (default: us-east-1).",
+}
+
+STEP_LABELS = {
+    "resolve_context": "Resolve context",
+    "discover_nat_gateways": "Discover NAT gateways",
+    "collect_nat_activity": "Collect NAT activity",
+    "identify_idle_nat": "Identify idle NAT",
+    "query_nat_cur_net_amortized_by_ids": "Query NAT CUR",
+    "build_nat_recommendations": "Build recommendations",
 }
 
 
@@ -45,14 +76,84 @@ def _append_message(role: str, content: str) -> None:
     st.session_state["messages"].append({"role": role, "content": content})
 
 
+def _assistant(content: str) -> None:
+    _append_message("assistant", content)
+
+
+def _apply_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"], [data-testid="collapsedControl"] { display: none !important; }
+        .stApp {
+            background:
+                radial-gradient(circle at 12% 8%, rgba(34, 197, 164, 0.24) 0%, rgba(34, 197, 164, 0) 38%),
+                radial-gradient(circle at 92% 4%, rgba(56, 189, 248, 0.20) 0%, rgba(56, 189, 248, 0) 42%),
+                linear-gradient(160deg, #f6fbfa 0%, #eef6f8 55%, #ecf3f6 100%);
+        }
+        .title-wrap {
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.78);
+            backdrop-filter: blur(2px);
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+        }
+        .title-main {
+            color: #0f172a;
+            font-size: 1.42rem;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            margin: 0;
+        }
+        .title-sub {
+            color: #334155;
+            font-size: 0.92rem;
+            margin: 4px 0 0 0;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .status-card {
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.82);
+            padding: 8px 10px;
+        }
+        .status-label {
+            color: #475569;
+            font-size: 0.76rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .status-value {
+            color: #0f172a;
+            font-size: 0.94rem;
+            font-weight: 600;
+            margin-top: 2px;
+            overflow-wrap: anywhere;
+        }
+        @media (max-width: 900px) {
+            .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _init_state() -> None:
     defaults = {
         "messages": [],
-        "wizard_step": STEP_VALIDATE_PROFILE,
-        "account_id": None,
+        "stage": STAGE_AWAIT_INTENT,
         "profile": "",
-        "active_action": DEFAULT_ACTION,
-        "edp_percent": None,
+        "account_id": None,
+        "project_name": "",
+        "project_options": [],
         "athena_database": os.getenv("ATHENA_DATABASE", ""),
         "athena_table": os.getenv("ATHENA_TABLE", ""),
         "athena_workgroup": os.getenv("ATHENA_WORKGROUP", "primary"),
@@ -60,13 +161,13 @@ def _init_state() -> None:
         "athena_profile_name": os.getenv("ATHENA_PROFILE_NAME", ""),
         "athena_region": os.getenv("ATHENA_REGION", "us-east-1"),
         "cur_skipped": False,
-        "scan_findings": [],
-        "region_cost_rows": [],
-        "cur_error": None,
-        "cur_warning": None,
-        "cur_query_profile": None,
-        "cur_query_region": None,
-        "selected_optimization_ids": [],
+        "cur_fields_queue": [],
+        "cur_edit_mode": False,
+        "recommendations": [],
+        "run_diagnostics": {},
+        "run_sql": None,
+        "run_warnings": [],
+        "run_cur_cost_lines": [],
         "latest_report_path": None,
         "latest_report_name": None,
     }
@@ -74,324 +175,540 @@ def _init_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
-
-def _validate_edp(text: str) -> float | None:
-    try:
-        value = float(text.strip())
-    except Exception:
-        return None
-    if value < 0 or value > 100:
-        return None
-    return value
+    if not st.session_state["messages"]:
+        _assistant(
+            "Ask me to analyze NAT gateway optimization for an account. Example: "
+            "`analyze idle nat gateway savings for this account with profile my-sso-profile`.\n\n"
+            "Commands: `/analyze profile=<name>`, `/project <name>`, `/athena edit`, `/rescan`, `/help`."
+        )
 
 
-def _active_action() -> str:
-    return st.session_state.get("active_action", DEFAULT_ACTION)
+def _reset_scan_outputs() -> None:
+    st.session_state["recommendations"] = []
+    st.session_state["run_diagnostics"] = {}
+    st.session_state["run_sql"] = None
+    st.session_state["run_warnings"] = []
+    st.session_state["run_cur_cost_lines"] = []
+    st.session_state["latest_report_path"] = None
+    st.session_state["latest_report_name"] = None
 
 
-def _action_needs_cur() -> bool:
-    action = _active_action()
-    req = ACTION_REQUIREMENTS.get(action, {})
-    return bool(req.get("needs_cur", False))
+def _reset_project_settings() -> None:
+    st.session_state["athena_database"] = os.getenv("ATHENA_DATABASE", "")
+    st.session_state["athena_table"] = os.getenv("ATHENA_TABLE", "")
+    st.session_state["athena_workgroup"] = os.getenv("ATHENA_WORKGROUP", "primary")
+    st.session_state["athena_output_s3"] = os.getenv("ATHENA_OUTPUT_S3", "")
+    st.session_state["athena_profile_name"] = os.getenv("ATHENA_PROFILE_NAME", "")
+    st.session_state["athena_region"] = os.getenv("ATHENA_REGION", "us-east-1")
+    st.session_state["cur_skipped"] = False
 
 
 def _missing_cur_fields() -> list[str]:
     missing = []
-    if not st.session_state.get("athena_database", "").strip():
-        missing.append("athena_database")
-    if not st.session_state.get("athena_table", "").strip():
-        missing.append("athena_table")
-    if not st.session_state.get("athena_workgroup", "").strip():
-        missing.append("athena_workgroup")
-    if not st.session_state.get("athena_output_s3", "").strip():
-        missing.append("athena_output_s3")
+    for field in CUR_FIELDS_REQUIRED:
+        if not str(st.session_state.get(field, "")).strip():
+            missing.append(field)
     return missing
 
 
 def _needs_cur_questions() -> bool:
-    if not _action_needs_cur():
-        return False
     if st.session_state.get("cur_skipped"):
         return False
     return bool(_missing_cur_fields())
 
 
-def _set_next_step_after_profile() -> None:
-    if _needs_cur_questions():
-        st.session_state["wizard_step"] = STEP_ASK_CUR_DATABASE
-        _append_message(
-            "assistant",
-            "This optimization needs CUR pricing. Enter Athena CUR database name, or type 'skip'.",
-        )
-    else:
-        st.session_state["wizard_step"] = STEP_ASK_EDP
-        _append_message("assistant", "Enter your EDP percentage (0-100).")
-
-
-def _summary_finding(findings: list[Finding]) -> Finding | None:
-    for f in findings:
-        if f.optimization_id == "aws_config.inventory_summary":
-            return f
-    return None
-
-
-def _evidence_map(finding: Finding | None) -> dict:
-    if finding is None:
-        return {}
-    return {e.key: e.value for e in finding.evidence}
-
-
-def _build_context(account_id: str | None) -> RunContext:
+def _build_context(
+    account_id: str | None,
+    progress_callback: Callable[[str, str, float | None], None] | None = None,
+) -> RunContext:
     return RunContext(
         profile_name=st.session_state.get("profile", ""),
         account_id=account_id,
         days=30,
         regions=[],
-        edp_percent=float(st.session_state.get("edp_percent") or 0.0),
         athena_database=st.session_state.get("athena_database", "").strip(),
         athena_table=st.session_state.get("athena_table", "").strip(),
         athena_workgroup=st.session_state.get("athena_workgroup", "").strip(),
         athena_output_s3=st.session_state.get("athena_output_s3", "").strip(),
         athena_profile_name=(st.session_state.get("athena_profile_name", "").strip() or None),
         athena_region=st.session_state.get("athena_region", "us-east-1").strip() or "us-east-1",
-        requested_by=None,
+        requested_by=st.session_state.get("project_name") or None,
+        progress_callback=progress_callback,
     )
 
 
-def _run_scan() -> None:
+def _persist_project_memory() -> None:
+    project_name = (st.session_state.get("project_name") or "").strip()
+    if not project_name:
+        return
+
+    existing = get_project(project_name)
+    memory = ProjectMemory(
+        project_name=project_name,
+        aws_profile_name=st.session_state.get("profile", "").strip(),
+        account_id=(st.session_state.get("account_id") or "").strip(),
+        cur_skipped=bool(st.session_state.get("cur_skipped")),
+        athena_database=st.session_state.get("athena_database", "").strip(),
+        athena_table=st.session_state.get("athena_table", "").strip(),
+        athena_workgroup=st.session_state.get("athena_workgroup", "primary").strip() or "primary",
+        athena_output_s3=st.session_state.get("athena_output_s3", "").strip(),
+        athena_profile_name=st.session_state.get("athena_profile_name", "").strip(),
+        athena_region=st.session_state.get("athena_region", "us-east-1").strip() or "us-east-1",
+        created_at=existing.created_at if existing else "",
+        last_used_at="",
+    )
+    upsert_project(memory)
+
+
+def _run_scan(progress_writer: Callable[[str], None] | None = None) -> None:
     account_id = st.session_state.get("account_id")
     profile_name = st.session_state.get("profile") or ""
-    action = _active_action()
     if not profile_name:
-        _append_message("assistant", "Please validate an AWS SSO profile first in the sidebar.")
-        st.session_state["wizard_step"] = STEP_VALIDATE_PROFILE
+        _assistant("Please start with an analysis request and validate an AWS profile in chat.")
+        st.session_state["stage"] = STAGE_AWAIT_PROFILE
         return
 
-    req = ActionRequest(action=action, profile_name=profile_name, days=30, regions=None, output="excel")
+    def _progress_callback(step: str, state: str, duration: float | None) -> None:
+        if progress_writer is None:
+            return
+        label = STEP_LABELS.get(step, step)
+        if state == "start":
+            progress_writer(f"Running `{label}`...")
+            return
+        if state == "done":
+            if duration is None:
+                progress_writer(f"Completed `{label}`.")
+            else:
+                progress_writer(f"Completed `{label}` in `{duration:.1f}s`.")
 
+    req = ActionRequest(action=ACTION_ID, profile_name=profile_name, days=30, regions=None, output="excel")
     try:
-        findings = run_action(req, lambda r: _build_context(account_id))
+        result = run_action(req, lambda _: _build_context(account_id, progress_callback=_progress_callback))
     except Exception as ex:
-        _append_message("assistant", f"Run failed: {ex}")
-        st.session_state["wizard_step"] = STEP_ASK_EDP
+        _assistant(f"Run failed: {ex}")
+        st.session_state["stage"] = STAGE_AWAIT_INTENT
         return
 
-    st.session_state["scan_findings"] = findings
-    summary = _summary_finding(findings)
-    summary_evidence = _evidence_map(summary)
-    st.session_state["region_cost_rows"] = summary_evidence.get("region_cost_inputs") or []
-    st.session_state["cur_error"] = summary_evidence.get("cur_error")
-    st.session_state["cur_warning"] = summary_evidence.get("cur_warning")
-    st.session_state["cur_query_profile"] = summary_evidence.get("cur_query_profile")
-    st.session_state["cur_query_region"] = summary_evidence.get("cur_query_region")
+    st.session_state["recommendations"] = result.recommendations
+    st.session_state["run_diagnostics"] = result.diagnostics
+    st.session_state["run_sql"] = result.sql_used
+    st.session_state["run_warnings"] = result.warnings
+    st.session_state["run_cur_cost_lines"] = result.cur_cost_lines
 
-    opportunities = [f for f in findings if f.optimization_id != "aws_config.inventory_summary"]
-    unique_opt_ids = sorted({f.optimization_id for f in opportunities})
-    st.session_state["selected_optimization_ids"] = unique_opt_ids
-    if st.session_state["cur_error"]:
-        _append_message(
-            "assistant",
-            "Scan completed, but CUR pricing data was unavailable for savings in some rows. "
-            "You can still review all optimization opportunities.",
-        )
-    elif st.session_state["cur_warning"]:
-        _append_message(
-            "assistant",
-            f"CUR warning: {st.session_state['cur_warning']} Pricing estimates may be partial.",
-        )
-    elif not st.session_state["region_cost_rows"]:
-        _append_message(
-            "assistant",
-            "CUR returned zero region rows, so savings fields may be null. "
-            "Verify Athena database/table/account and data freshness. "
-            "If CUR lives in management account, set CUR profile to that payer profile and region to us-east-1.",
-        )
-    _append_message(
-        "assistant",
-        f"Scan complete. Found {len(opportunities)} optimization opportunities. "
-        "Select optimization(s) below to create Excel.",
+    _assistant(
+        "Scan complete for project "
+        f"`{st.session_state.get('project_name') or 'unspecified'}`. "
+        f"Found {len(result.recommendations)} NAT recommendation(s)."
     )
-    st.session_state["wizard_step"] = STEP_CHOOSE_FOR_EXCEL
+
+    _persist_project_memory()
+    st.session_state["stage"] = STAGE_READY_WITH_RESULTS
 
 
-st.set_page_config(page_title="FinOps Copilot", layout="wide")
-st.title("FinOps Copilot")
-_init_state()
+def _start_cur_collection(edit_mode: bool) -> None:
+    if edit_mode:
+        queue = CUR_FIELDS_ALL.copy()
+    else:
+        queue = [field for field in CUR_FIELDS_REQUIRED if not str(st.session_state.get(field, "")).strip()]
+        if queue and "athena_region" not in queue:
+            queue.append("athena_region")
 
-if not st.session_state["messages"]:
-    _append_message("assistant", "Validate an AWS SSO profile in the sidebar to begin.")
+    st.session_state["cur_fields_queue"] = queue
+    st.session_state["cur_edit_mode"] = edit_mode
 
-with st.sidebar:
-    st.header("AWS Connection (SSO)")
-    profile = st.text_input("AWS profile name", value=st.session_state.get("profile", ""))
-    st.session_state["profile"] = profile
-    if st.button("Validate"):
+    if not queue:
+        _assistant("Running optimization scan...")
+        st.session_state["stage"] = STAGE_RUNNING_SCAN
+        return
+
+    st.session_state["stage"] = STAGE_AWAIT_CUR_FIELDS
+    _ask_next_cur_prompt()
+
+
+def _ask_next_cur_prompt() -> None:
+    queue = st.session_state.get("cur_fields_queue", [])
+    if not queue:
+        _persist_project_memory()
+        _assistant("CUR config saved. Running optimization scan...")
+        st.session_state["stage"] = STAGE_RUNNING_SCAN
+        return
+
+    field = queue[0]
+    prompt = CUR_FIELD_PROMPTS[field]
+    if st.session_state.get("cur_edit_mode"):
+        current = str(st.session_state.get(field, "")).strip()
+        if field == "athena_profile_name" and not current:
+            current = "same as validated profile"
+        if field == "athena_region" and not current:
+            current = "us-east-1"
+        prompt = f"{prompt} Current: `{current or '(empty)'}`. Type `-` to keep current."
+
+    _assistant(prompt)
+
+
+def _parse_project_selection(text: str) -> str:
+    candidate = text.strip()
+    if not candidate:
+        return ""
+
+    options = st.session_state.get("project_options") or []
+    if candidate.isdigit():
+        idx = int(candidate)
+        if 1 <= idx <= len(options):
+            return options[idx - 1]
+
+    for name in options:
+        if name.lower() == candidate.lower():
+            return name
+
+    return candidate
+
+
+def _prompt_project_selection() -> None:
+    st.session_state["project_options"] = list_projects()
+    options = st.session_state["project_options"]
+    if options:
+        lines = [f"{idx}. `{name}`" for idx, name in enumerate(options, start=1)]
+        _assistant(
+            "Choose a project for this analysis. Reply with the number or type a new project name.\n\n"
+            + "\n".join(lines)
+        )
+    else:
+        _assistant("No saved projects found. Type a new project name to create memory for this account.")
+    st.session_state["stage"] = STAGE_AWAIT_PROJECT_SELECTION
+
+
+def _select_project(project_name: str) -> None:
+    clean_name = project_name.strip()
+    if not clean_name:
+        _assistant("Project name cannot be empty. Reply with a project number or project name.")
+        return
+
+    existing = get_project(clean_name)
+    if existing:
+        st.session_state["project_name"] = existing.project_name
+        st.session_state["athena_database"] = existing.athena_database
+        st.session_state["athena_table"] = existing.athena_table
+        st.session_state["athena_workgroup"] = existing.athena_workgroup or "primary"
+        st.session_state["athena_output_s3"] = existing.athena_output_s3
+        st.session_state["athena_profile_name"] = existing.athena_profile_name
+        st.session_state["athena_region"] = existing.athena_region or "us-east-1"
+        st.session_state["cur_skipped"] = bool(existing.cur_skipped)
+        _assistant(f"Loaded saved project `{existing.project_name}`.")
+    else:
+        st.session_state["project_name"] = clean_name
+        _reset_project_settings()
+        _assistant(f"Created new project `{clean_name}`.")
+
+    _persist_project_memory()
+
+    if _needs_cur_questions():
+        _start_cur_collection(edit_mode=False)
+        return
+
+    _assistant("Running optimization scan...")
+    st.session_state["stage"] = STAGE_RUNNING_SCAN
+
+
+def _validate_and_set_profile(profile_name: str) -> None:
+    clean = profile_name.strip()
+    if not clean:
+        st.session_state["stage"] = STAGE_AWAIT_PROFILE
+        _assistant("Profile name cannot be empty. Enter the AWS SSO profile name to continue.")
+        return
+
+    st.session_state["stage"] = STAGE_VALIDATING_PROFILE
+    try:
+        ident = validate_profile(clean)
+    except Exception as ex:
+        st.session_state["stage"] = STAGE_AWAIT_PROFILE
+        _assistant(f"Profile validation failed: {ex}")
+        return
+
+    st.session_state["profile"] = clean
+    st.session_state["account_id"] = ident["account"]
+    st.session_state["project_name"] = ""
+    _reset_scan_outputs()
+
+    _assistant(
+        f"Profile validated. Account `{ident['account']}` | ARN `{ident['arn']}`.\n"
+        "Now select an existing project or provide a new project name."
+    )
+    _prompt_project_selection()
+
+
+def _handle_rescan() -> None:
+    if not st.session_state.get("profile"):
+        st.session_state["stage"] = STAGE_AWAIT_PROFILE
+        _assistant("Start with an analysis request and profile validation first.")
+        return
+    if not st.session_state.get("project_name"):
+        _prompt_project_selection()
+        return
+    if _needs_cur_questions():
+        _start_cur_collection(edit_mode=False)
+        return
+
+    _assistant("Running optimization scan...")
+    st.session_state["stage"] = STAGE_RUNNING_SCAN
+
+
+def _handle_cur_field_input(user_text: str) -> None:
+    queue = st.session_state.get("cur_fields_queue", [])
+    if not queue:
+        _ask_next_cur_prompt()
+        return
+
+    value = user_text.strip()
+    field = queue[0]
+    edit_mode = bool(st.session_state.get("cur_edit_mode"))
+    if value.lower() == "skip" and not edit_mode:
+        st.session_state["cur_skipped"] = True
+        st.session_state["athena_database"] = ""
+        st.session_state["athena_table"] = ""
+        st.session_state["athena_workgroup"] = ""
+        st.session_state["athena_output_s3"] = ""
+        st.session_state["athena_profile_name"] = ""
+        st.session_state["athena_region"] = "us-east-1"
+        st.session_state["cur_fields_queue"] = []
+        st.session_state["cur_edit_mode"] = False
+        _assistant("CUR input skipped for this project. Monthly costs may be empty.")
+        _persist_project_memory()
+        _assistant("Running optimization scan...")
+        st.session_state["stage"] = STAGE_RUNNING_SCAN
+        return
+
+    if edit_mode and value == "-":
+        st.session_state["cur_fields_queue"] = queue[1:]
+        _ask_next_cur_prompt()
+        return
+
+    if field in {"athena_profile_name", "athena_region"} and value == "-":
+        st.session_state["cur_fields_queue"] = queue[1:]
+        _ask_next_cur_prompt()
+        return
+
+    if field in {"athena_database", "athena_table"}:
+        if not value:
+            _assistant("This field cannot be empty.")
+            return
+        st.session_state[field] = value
+    elif field == "athena_workgroup":
+        st.session_state[field] = value or "primary"
+    elif field == "athena_output_s3":
+        if not value.startswith("s3://"):
+            _assistant("Athena output must start with `s3://`.")
+            return
+        st.session_state[field] = value
+    elif field == "athena_profile_name":
+        if value.lower() in {"", "same"}:
+            cur_profile = st.session_state.get("profile", "").strip()
+        else:
+            cur_profile = value
         try:
-            ident = validate_profile(profile)
-            st.success(f"Connected: {ident['account']} | {ident['arn']}")
-            st.session_state["account_id"] = ident["account"]
-            st.session_state["active_action"] = DEFAULT_ACTION
-            st.session_state["scan_findings"] = []
-            st.session_state["latest_report_path"] = None
-            st.session_state["latest_report_name"] = None
-            st.session_state["cur_skipped"] = False
-            _append_message("assistant", "Profile validated for AWS Config savings scan.")
-            _set_next_step_after_profile()
+            validate_profile(cur_profile)
         except Exception as ex:
-            st.error(str(ex))
+            _assistant(
+                f"CUR query profile `{cur_profile}` failed validation: {ex}. "
+                f"Run `aws sso login --profile {cur_profile}` then re-enter this value."
+            )
+            return
+        st.session_state[field] = cur_profile
+    elif field == "athena_region":
+        st.session_state[field] = value or "us-east-1"
 
-st.markdown("### Chat")
-for m in st.session_state["messages"]:
-    st.chat_message(m["role"]).write(m["content"])
+    st.session_state["cur_fields_queue"] = queue[1:]
+    _ask_next_cur_prompt()
 
-prompt_map = {
-    STEP_VALIDATE_PROFILE: "Validate AWS profile in sidebar first.",
-    STEP_ASK_CUR_DATABASE: "Enter Athena CUR database (or type 'skip').",
-    STEP_ASK_CUR_TABLE: "Enter Athena CUR table name.",
-    STEP_ASK_CUR_WORKGROUP: "Enter Athena workgroup (or press Enter for 'primary').",
-    STEP_ASK_CUR_OUTPUT_S3: "Enter Athena results S3 location (s3://...).",
-    STEP_ASK_CUR_PROFILE: "Enter CUR query profile name (or type 'same').",
-    STEP_ASK_CUR_REGION: "Enter CUR Athena region (default us-east-1).",
-    STEP_ASK_EDP: "Enter EDP percent (0-100). Example: 12",
-    STEP_RUN_SCAN: "Running scan...",
-    STEP_SHOW_OPPORTUNITIES: "Type 'rescan' to run again, or select optimizations for Excel below.",
-    STEP_CHOOSE_FOR_EXCEL: "Select optimization(s) for Excel below, or type 'rescan' to rerun.",
-    STEP_DOWNLOAD: "Download your Excel below, or type 'rescan' to rerun.",
-}
-user_text = st.chat_input(prompt_map.get(st.session_state["wizard_step"], "Enter command"))
 
-if user_text:
+def _help_text() -> str:
+    return (
+        "Available commands:\n"
+        "- `/analyze profile=<aws-profile>`\n"
+        "- `/project <project-name>`\n"
+        "- `/athena edit`\n"
+        "- `/rescan`\n"
+        "- `/help`\n\n"
+        "Natural chat also works, for example: "
+        "`analyze idle nat gateway savings for this account with profile finops-sso`."
+    )
+
+
+def _handle_analyze_intent(profile_name: str | None) -> None:
+    if profile_name:
+        _validate_and_set_profile(profile_name)
+        return
+
+    if st.session_state.get("profile"):
+        _assistant(f"Using validated profile `{st.session_state['profile']}`. Select a project for this analysis.")
+        _prompt_project_selection()
+        return
+
+    st.session_state["stage"] = STAGE_AWAIT_PROFILE
+    _assistant("Which AWS SSO profile should I use for this analysis?")
+
+
+def handle_user_input(user_text: str) -> None:
     _append_message("user", user_text)
     text = user_text.strip()
-    lower = text.lower()
+    if not text:
+        _assistant("Enter a message to continue.")
+        return
 
-    if lower in {"rescan", "rerun"}:
-        if _needs_cur_questions():
-            st.session_state["wizard_step"] = STEP_ASK_CUR_DATABASE
-            _append_message("assistant", "This optimization needs CUR pricing. Enter Athena CUR database, or type 'skip'.")
-        elif st.session_state.get("edp_percent") is None:
-            _append_message("assistant", "Please enter EDP percentage first.")
-            st.session_state["wizard_step"] = STEP_ASK_EDP
-        else:
-            _append_message("assistant", "Running AWS Config optimization scan...")
-            st.session_state["wizard_step"] = STEP_RUN_SCAN
-    elif st.session_state["wizard_step"] == STEP_VALIDATE_PROFILE:
-        _append_message("assistant", "Please validate an AWS SSO profile first in the sidebar.")
-    elif st.session_state["wizard_step"] == STEP_ASK_CUR_DATABASE:
-        if lower == "skip":
-            st.session_state["cur_skipped"] = True
-            st.session_state["athena_database"] = ""
-            st.session_state["athena_table"] = ""
-            st.session_state["athena_workgroup"] = ""
-            st.session_state["athena_output_s3"] = ""
-            st.session_state["athena_profile_name"] = ""
-            st.session_state["athena_region"] = "us-east-1"
-            st.session_state["wizard_step"] = STEP_ASK_EDP
-            _append_message("assistant", "CUR input skipped. Savings may be null. Enter EDP percentage (0-100).")
-        elif not text:
-            _append_message("assistant", "Athena database cannot be empty. Enter database, or type 'skip'.")
-        else:
-            st.session_state["cur_skipped"] = False
-            st.session_state["athena_database"] = text
-            st.session_state["wizard_step"] = STEP_ASK_CUR_TABLE
-            _append_message("assistant", "Enter Athena CUR table name.")
-    elif st.session_state["wizard_step"] == STEP_ASK_CUR_TABLE:
-        if not text:
-            _append_message("assistant", "Athena table cannot be empty.")
-        else:
-            st.session_state["athena_table"] = text
-            st.session_state["wizard_step"] = STEP_ASK_CUR_WORKGROUP
-            _append_message("assistant", "Enter Athena workgroup (or type 'primary').")
-    elif st.session_state["wizard_step"] == STEP_ASK_CUR_WORKGROUP:
-        st.session_state["athena_workgroup"] = text or "primary"
-        st.session_state["wizard_step"] = STEP_ASK_CUR_OUTPUT_S3
-        _append_message("assistant", "Enter Athena output S3 path (s3://bucket/prefix).")
-    elif st.session_state["wizard_step"] == STEP_ASK_CUR_OUTPUT_S3:
-        if not text.startswith("s3://"):
-            _append_message("assistant", "Athena output must start with s3://")
-        else:
-            st.session_state["athena_output_s3"] = text
-            st.session_state["wizard_step"] = STEP_ASK_CUR_PROFILE
-            _append_message("assistant", "Enter CUR query profile name, or type 'same' to use current profile.")
-    elif st.session_state["wizard_step"] == STEP_ASK_CUR_PROFILE:
-        if lower in {"same", ""}:
-            st.session_state["athena_profile_name"] = ""
-        else:
-            st.session_state["athena_profile_name"] = text
-        st.session_state["wizard_step"] = STEP_ASK_CUR_REGION
-        _append_message("assistant", "Enter CUR Athena region (default us-east-1).")
-    elif st.session_state["wizard_step"] == STEP_ASK_CUR_REGION:
-        st.session_state["athena_region"] = text or "us-east-1"
-        st.session_state["wizard_step"] = STEP_ASK_EDP
-        _append_message(
-            "assistant",
-            "CUR config saved (including profile/region). Enter your EDP percentage (0-100).",
+    stage = st.session_state.get("stage", STAGE_AWAIT_INTENT)
+    if not text.startswith("/"):
+        if stage == STAGE_AWAIT_PROFILE:
+            _validate_and_set_profile(text)
+            return
+        if stage == STAGE_AWAIT_PROJECT_SELECTION:
+            _select_project(_parse_project_selection(text))
+            return
+        if stage == STAGE_AWAIT_CUR_FIELDS:
+            _handle_cur_field_input(text)
+            return
+
+    intent = route(text)
+
+    if intent.intent == "help":
+        _assistant(_help_text())
+        return
+    if intent.intent == "rescan":
+        _handle_rescan()
+        return
+    if intent.intent == "update_athena":
+        if not st.session_state.get("project_name"):
+            _assistant("Select a project first with `/project <name>`.")
+            st.session_state["stage"] = STAGE_AWAIT_PROJECT_SELECTION
+            _prompt_project_selection()
+            return
+        _assistant(
+            f"Editing Athena settings for `{st.session_state['project_name']}`. "
+            "Type `-` to keep a field as-is."
         )
-    elif st.session_state["wizard_step"] == STEP_ASK_EDP:
-        edp = _validate_edp(text)
-        if edp is None:
-            _append_message("assistant", "Invalid EDP. Enter a number between 0 and 100.")
-        else:
-            st.session_state["edp_percent"] = edp
-            st.session_state["wizard_step"] = STEP_RUN_SCAN
-            _append_message("assistant", f"EDP set to {edp:.2f}%. Running AWS Config optimization scan...")
-    else:
-        _append_message("assistant", "Use 'rescan' to rerun, or select optimizations below for Excel export.")
+        st.session_state["cur_skipped"] = False
+        _start_cur_collection(edit_mode=True)
+        return
+    if intent.intent == "set_project":
+        if not st.session_state.get("profile"):
+            st.session_state["stage"] = STAGE_AWAIT_PROFILE
+            _assistant("Validate profile first. Example: `/analyze profile=my-sso-profile`.")
+            return
+        if intent.project_name:
+            _select_project(intent.project_name)
+            return
+        _prompt_project_selection()
+        return
+    if intent.intent == "analyze":
+        _handle_analyze_intent(intent.profile_name)
+        return
 
-if st.session_state["wizard_step"] == STEP_RUN_SCAN:
-    with st.spinner("Running AWS Config optimization scan..."):
-        _run_scan()
+    _assistant("I can help run optimization scans. Ask to analyze an account with a profile, or use `/help`.")
+
+
+def _chat_placeholder() -> str:
+    stage = st.session_state.get("stage", STAGE_AWAIT_INTENT)
+    if stage == STAGE_AWAIT_PROFILE:
+        return "Enter AWS SSO profile name..."
+    if stage == STAGE_AWAIT_PROJECT_SELECTION:
+        return "Type project number or project name..."
+    if stage == STAGE_AWAIT_CUR_FIELDS:
+        return "Enter Athena detail..."
+    if stage == STAGE_RUNNING_SCAN:
+        return "Scan running..."
+    return "Ask me to analyze optimization opportunities..."
+
+
+def _status_value(value: str | None, fallback: str = "Not set") -> str:
+    clean = (value or "").strip()
+    return clean if clean else fallback
+
+
+def _render_status() -> None:
+    project = _status_value(st.session_state.get("project_name"), "Not selected")
+    profile = _status_value(st.session_state.get("profile"), "Not validated")
+    account = _status_value(st.session_state.get("account_id"), "Unknown")
+
+    if st.session_state.get("cur_skipped"):
+        cur_status = "Skipped"
+    elif _needs_cur_questions():
+        cur_status = "Needs Athena Inputs"
+    else:
+        cur_status = "Ready"
+
+    st.markdown(
+        f"""
+        <div class="status-grid">
+            <div class="status-card"><div class="status-label">Project</div><div class="status-value">{project}</div></div>
+            <div class="status-card"><div class="status-label">AWS Profile</div><div class="status-value">{profile}</div></div>
+            <div class="status-card"><div class="status-label">Account</div><div class="status-value">{account}</div></div>
+            <div class="status-card"><div class="status-label">CUR Setup</div><div class="status-value">{cur_status}</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+st.set_page_config(page_title="CostOps Copilot", layout="wide", initial_sidebar_state="collapsed")
+_apply_theme()
+_init_state()
+
+st.markdown(
+    """
+    <div class="title-wrap">
+      <p class="title-main">CostOps Copilot</p>
+      <p class="title-sub">Chat-first optimization analysis with reusable project memory</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+_render_status()
+
+user_text = st.chat_input(_chat_placeholder())
+if user_text is not None and user_text.strip():
+    handle_user_input(user_text)
     st.rerun()
 
-findings = st.session_state.get("scan_findings") or []
-opportunities = [f for f in findings if f.optimization_id != "aws_config.inventory_summary"]
-region_cost_rows = st.session_state.get("region_cost_rows") or []
-if opportunities:
-    st.markdown("### CUR Region Cost Inputs")
-    cur_profile_label = st.session_state.get("cur_query_profile") or st.session_state.get("profile") or ""
-    cur_region_label = st.session_state.get("cur_query_region") or st.session_state.get("athena_region") or "us-east-1"
-    st.caption(f"CUR query profile: `{cur_profile_label}` | region: `{cur_region_label}`")
-    if region_cost_rows:
-        st.dataframe(pd.DataFrame(region_cost_rows), use_container_width=True)
-    else:
-        st.info("No CUR cost rows were returned for this scan.")
-
-    st.markdown("### Optimization Opportunities")
-    st.dataframe(pd.DataFrame(findings_to_rows(opportunities)), use_container_width=True)
-    id_to_title = {}
-    for f in opportunities:
-        id_to_title.setdefault(f.optimization_id, f.title)
-    optimization_ids = sorted(id_to_title.keys())
-    selected_ids = st.multiselect(
-        "Choose optimization(s) to include in Excel",
-        options=optimization_ids,
-        default=st.session_state.get("selected_optimization_ids", optimization_ids),
-        format_func=lambda opt_id: f"{opt_id} | {id_to_title.get(opt_id, '')}",
-    )
-    st.session_state["selected_optimization_ids"] = selected_ids
-
-    if st.button("Create Excel For Selected Optimizations"):
-        if not selected_ids:
-            st.warning("Select at least one optimization.")
+if st.session_state.get("stage") == STAGE_RUNNING_SCAN:
+    with st.status("Running optimization scan...", expanded=True) as status:
+        _run_scan(progress_writer=status.write)
+        if st.session_state.get("stage") == STAGE_READY_WITH_RESULTS:
+            status.update(label="Optimization scan complete", state="complete")
         else:
-            selected_findings = [f for f in opportunities if f.optimization_id in selected_ids]
-            account_id = st.session_state.get("account_id")
-            out_file = f"finops_report_{account_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            out_path = write_excel(
-                selected_findings,
-                out_file,
-                account_id=account_id,
-                edp_percent=st.session_state.get("edp_percent"),
-                region_cost_rows=st.session_state.get("region_cost_rows") or [],
-                validation_sql=None,
-            )
-            st.session_state["latest_report_path"] = out_path
-            st.session_state["latest_report_name"] = out_file
-            st.session_state["wizard_step"] = STEP_DOWNLOAD
-            _append_message(
-                "assistant",
-                f"Prepared Excel for {len(selected_findings)} findings across {len(selected_ids)} optimization types.",
-            )
+            status.update(label="Optimization scan failed", state="error")
+    st.rerun()
+
+st.markdown("### Chat")
+for message in st.session_state["messages"]:
+    st.chat_message(message["role"]).write(message["content"])
+
+recommendations = st.session_state.get("recommendations") or []
+
+if recommendations:
+    st.markdown("### NAT Recommendations")
+    st.dataframe(pd.DataFrame(recommendations_to_rows(recommendations)), use_container_width=True)
+
+elif st.session_state.get("stage") == STAGE_READY_WITH_RESULTS:
+    st.info("Scan completed with no NAT recommendations.")
+
+if st.session_state.get("stage") == STAGE_READY_WITH_RESULTS:
+    if st.button("Create Excel Recommendations"):
+        account_id = st.session_state.get("account_id")
+        out_file = f"finops_report_{account_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        out_path = write_excel(
+            recommendations=recommendations,
+            out_path=out_file,
+            account_id=account_id,
+            sql_used=st.session_state.get("run_sql"),
+            cur_cost_lines=st.session_state.get("run_cur_cost_lines") or [],
+            warnings=st.session_state.get("run_warnings") or [],
+            diagnostics=st.session_state.get("run_diagnostics") or {},
+        )
+        st.session_state["latest_report_path"] = out_path
+        st.session_state["latest_report_name"] = out_file
+        _assistant(f"Prepared Excel with {len(recommendations)} recommendation row(s).")
+        _persist_project_memory()
+        st.rerun()
 
 report_path = st.session_state.get("latest_report_path")
 report_name = st.session_state.get("latest_report_name")

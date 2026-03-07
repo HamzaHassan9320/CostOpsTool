@@ -1,26 +1,22 @@
 from __future__ import annotations
-from app.core.types import Finding
+
+from app.core.types import NatRecommendationRow
 
 
-def findings_to_rows(findings: list[Finding]) -> list[dict]:
+def recommendations_to_rows(recommendations: list[NatRecommendationRow]) -> list[dict]:
     rows = []
-    for f in findings:
-        rows.append({
-            "service": f.service,
-            "optimization_id": f.optimization_id,
-            "title": f.title,
-            "account_id": f.account_id,
-            "region": f.region,
-            "severity": f.severity,
-            "effort": f.effort,
-            "risk": f.risk,
-            "confidence": f.confidence,
-            "est_monthly_savings_usd": f.est_monthly_savings_usd,
-            "est_monthly_savings_gross_usd": f.est_monthly_savings_gross_usd,
-            "est_monthly_savings_net_usd": f.est_monthly_savings_net_usd,
-            "est_annual_savings_gross_usd": f.est_annual_savings_gross_usd,
-            "est_annual_savings_net_usd": f.est_annual_savings_net_usd,
-            "recommendation": f.recommendation,
-            "evidence": "; ".join([f"{e.key}={e.value}" for e in f.evidence]),
-        })
+    for row in recommendations:
+        rows.append(
+            {
+                "Account ID": row.account_id,
+                "Region": row.region,
+                "Gateway Name": row.gateway_name,
+                "Gateway ID": row.gateway_id,
+                "Lookback Duration": row.lookback_duration,
+                "BytesOutToDestination": row.bytes_out_to_destination,
+                "BytesOutToSource": row.bytes_out_to_source,
+                "Active Connections": row.active_connections,
+                "Monthly Cost": row.monthly_cost,
+            }
+        )
     return rows

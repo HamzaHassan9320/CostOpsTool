@@ -1,8 +1,15 @@
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
 from typing import Literal
 
-class RouterOutput(BaseModel):
-    action: str = Field(..., description="Action id, e.g. aws_config.savings_scan")
-    profile_name: str = Field(..., description="Local AWS profile name (SSO-based)")
-    days: int = Field(30, ge=1, le=365)
-    output: Literal["excel", "json", "markdown"] = "excel"
+from pydantic import BaseModel, Field
+
+IntentName = Literal["analyze", "set_project", "update_athena", "rescan", "help", "chat"]
+
+
+class RouterIntent(BaseModel):
+    intent: IntentName = Field(default="chat")
+    action: str = Field(default="optimization.run_scan")
+    profile_name: str | None = None
+    project_name: str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
