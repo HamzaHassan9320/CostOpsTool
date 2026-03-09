@@ -32,4 +32,4 @@ def test_recovered_llm_tool_error_is_diagnostic_not_warning(monkeypatch):
     )
 
     assert result.warnings == []
-    assert 'llm_tool_error_recovered' in result.diagnostics
+    assert 'llm_tool_error_recovered' in (result.diagnostics.get('tool_diagnostics') or {})

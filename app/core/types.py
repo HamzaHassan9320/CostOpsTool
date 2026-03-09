@@ -17,6 +17,10 @@ class RunContext:
     athena_region: str = "us-east-1"
     requested_by: str | None = None
     progress_callback: Callable[[str, str, float | None], None] | None = None
+    aws_session: Any | None = None
+    cur_session: Any | None = None
+    account_name: str | None = None
+    role_name: str | None = None
 
 
 @dataclass

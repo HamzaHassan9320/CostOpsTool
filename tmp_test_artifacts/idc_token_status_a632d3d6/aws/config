@@ -1,0 +1,7 @@
+[profile dev-sso]
+sso_session = costops-dev-sso
+
+[sso-session costops-dev-sso]
+sso_start_url = https://d-example.awsapps.com/start
+sso_region = eu-west-1
+

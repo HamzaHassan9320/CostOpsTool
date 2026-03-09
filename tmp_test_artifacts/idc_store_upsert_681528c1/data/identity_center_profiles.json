@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "profiles": {
+    "dev-sso": {
+      "profile_name": "dev-sso",
+      "sso_start_url": "https://d-example.awsapps.com/start",
+      "sso_region": "eu-west-1",
+      "preferred_role_name": "ReadOnly",
+      "default_account_id": "123456789012",
+      "default_region": "eu-west-1",
+      "created_at": "2026-03-09T01:09:59.845127+00:00",
+      "updated_at": "2026-03-09T01:09:59.845127+00:00",
+      "last_used_at": "2026-03-09T01:09:59.845127+00:00"
+    }
+  }
+}

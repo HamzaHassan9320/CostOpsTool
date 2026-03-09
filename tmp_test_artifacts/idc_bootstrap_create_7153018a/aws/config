@@ -1,0 +1,11 @@
+[profile dev-sso]
+sso_session = costops-dev-sso
+region = eu-west-1
+sso_role_name = ReadOnly
+sso_account_id = 123456789012
+
+[sso-session costops-dev-sso]
+sso_start_url = https://d-example.awsapps.com/start
+sso_region = eu-west-1
+sso_registration_scopes = sso:account:access
+

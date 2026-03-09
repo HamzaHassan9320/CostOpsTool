@@ -24,6 +24,7 @@ class ProjectMemory:
     athena_workgroup: str = "primary"
     athena_output_s3: str = ""
     athena_profile_name: str = ""
+    athena_account_id: str = ""
     athena_region: str = "us-east-1"
     created_at: str = ""
     updated_at: str = ""
@@ -58,6 +59,7 @@ def _normalize_project(raw: dict[str, Any], name_hint: str) -> ProjectMemory:
         athena_workgroup=(raw.get("athena_workgroup") or "primary").strip() or "primary",
         athena_output_s3=(raw.get("athena_output_s3") or "").strip(),
         athena_profile_name=(raw.get("athena_profile_name") or "").strip(),
+        athena_account_id=(raw.get("athena_account_id") or "").strip(),
         athena_region=(raw.get("athena_region") or "us-east-1").strip() or "us-east-1",
         created_at=created_at,
         updated_at=updated_at,
@@ -165,6 +167,7 @@ def upsert_project(memory: ProjectMemory) -> None:
         athena_workgroup=(memory.athena_workgroup or "primary").strip() or "primary",
         athena_output_s3=(memory.athena_output_s3 or "").strip(),
         athena_profile_name=(memory.athena_profile_name or "").strip(),
+        athena_account_id=(memory.athena_account_id or "").strip(),
         athena_region=(memory.athena_region or "us-east-1").strip() or "us-east-1",
         created_at=created_at,
         updated_at=now,

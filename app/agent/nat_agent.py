@@ -28,9 +28,14 @@ from app.services.nat.optimization import (
 class NatOptimizationToolset:
     def __init__(self, ctx: RunContext):
         self.ctx = ctx
-        self.sess = make_boto3_session(ctx.profile_name)
-        cur_profile = (ctx.athena_profile_name or "").strip() or ctx.profile_name
-        self.cur_sess = make_boto3_session(cur_profile)
+        self.sess = ctx.aws_session or make_boto3_session(ctx.profile_name)
+        cur_profile = (ctx.athena_profile_name or "").strip()
+        if ctx.cur_session is not None:
+            self.cur_sess = ctx.cur_session
+        elif cur_profile:
+            self.cur_sess = make_boto3_session(cur_profile)
+        else:
+            raise ValueError("CUR profile is required. Set athena_profile_name before running optimization.")
 
         self.regions: list[str] = []
         self.gateways: list[NatGatewayInfo] = []
@@ -86,6 +91,8 @@ class NatOptimizationToolset:
             result = {
                 "profile_name": self.ctx.profile_name,
                 "account_id": self.ctx.account_id,
+                "account_name": self.ctx.account_name,
+                "role_name": self.ctx.role_name,
                 "athena_region": self.ctx.athena_region,
                 "cur_ready": cur_ready,
             }
@@ -113,9 +120,24 @@ class NatOptimizationToolset:
         started = self._start_step("collect_nat_activity")
         try:
             self.activity_by_nat_id, self.activity_errors = collect_nat_gateway_activity(self.sess, self.gateways)
+            timeout_count = sum(
+                1
+                for error in self.activity_errors
+                if any(token in error.lower() for token in {"timeout", "timed out", "throttl"})
+            )
+            if self.activity_errors:
+                warning = (
+                    f"CloudWatch metric collection had {len(self.activity_errors)} error(s)"
+                    f" across {len(self.gateways)} discovered NAT gateway(s). "
+                    "Idle NAT detection may be incomplete."
+                )
+                if timeout_count:
+                    warning += f" Timeout/throttle-related errors: {timeout_count}."
+                self.warnings.append(warning)
             response = {
                 "activity_gateway_count": len(self.activity_by_nat_id),
                 "activity_error_count": len(self.activity_errors),
+                "activity_timeout_error_count": timeout_count,
             }
             self.diagnostics["activity"] = response
             return response
@@ -130,6 +152,15 @@ class NatOptimizationToolset:
                 activity_by_nat_id=self.activity_by_nat_id,
                 activity_errors=self.discovery_errors + self.activity_errors,
             )
+            if (
+                self.scan_summary.nat_gateway_count_scanned > 0
+                and not self.activity_by_nat_id
+                and self.scan_summary.nat_metric_error_count > 0
+            ):
+                self.warnings.append(
+                    "No NAT activity metrics were collected for scanned gateways due to API errors; "
+                    "idle results may be under-reported."
+                )
             response = {
                 "idle_candidate_count": len(self.idle_candidates),
                 "idle_6m_count": self.scan_summary.nat_gateway_idle_6m_count,
@@ -154,8 +185,12 @@ class NatOptimizationToolset:
                     month_days=30,
                     warning="No idle NAT gateways were found, so CUR lookup was skipped.",
                 )
-                self.warnings.append(self.cur_result.warning)
-                response = {"cur_skipped": True, "reason": self.cur_result.warning}
+                response = {
+                    "cur_skipped": True,
+                    "reason": self.cur_result.warning,
+                    "cur_line_count": 0,
+                    "cur_gateway_count": 0,
+                }
                 self.diagnostics["cur"] = response
                 return response
 
@@ -166,19 +201,10 @@ class NatOptimizationToolset:
                 and self.ctx.athena_workgroup
                 and self.ctx.athena_output_s3
             ):
-                self.cur_result = NatGatewayCurCostResult(
-                    monthly_cost_by_nat_id={},
-                    eip_monthly_price_per_eip=None,
-                    lines=[],
-                    sql="",
-                    month_start=datetime.utcnow().date(),
-                    month_days=30,
-                    warning="Athena CUR settings are incomplete; monthly costs were left empty.",
+                raise RuntimeError(
+                    "CUR settings are incomplete. Required: account_id, athena_database, "
+                    "athena_table, athena_workgroup, and athena_output_s3."
                 )
-                self.warnings.append(self.cur_result.warning)
-                response = {"cur_skipped": True, "reason": self.cur_result.warning}
-                self.diagnostics["cur"] = response
-                return response
 
             self.cur_result = get_last_full_month_nat_gateway_net_amortized_costs_by_ids(
                 sess=self.cur_sess,
@@ -200,6 +226,12 @@ class NatOptimizationToolset:
             }
             self.diagnostics["cur"] = response
             return response
+        except Exception as ex:
+            message = (
+                f"CUR pricing query failed for account `{self.ctx.account_id or 'unknown'}`: {ex}"
+            )
+            self.diagnostics["cur"] = {"error": message}
+            raise RuntimeError(message) from ex
         finally:
             self._finish_step("query_nat_cur_net_amortized_by_ids", started)
 

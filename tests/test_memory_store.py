@@ -1,9 +1,20 @@
 from app.memory import store
 from app.memory.store import ProjectMemory
+import shutil
+import uuid
+from pathlib import Path
 
 
-def test_memory_store_create_and_upsert(tmp_path, monkeypatch):
-    data_dir = tmp_path / 'data'
+def _case_dir(name: str) -> Path:
+    root = Path("tmp_test_artifacts") / f"{name}_{uuid.uuid4().hex[:8]}"
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_memory_store_create_and_upsert(monkeypatch):
+    data_dir = _case_dir("memory_store_create_and_upsert") / 'data'
     memory_file = data_dir / 'project_memory.json'
 
     monkeypatch.setattr(store, 'DATA_DIR', data_dir)
@@ -23,6 +34,7 @@ def test_memory_store_create_and_upsert(tmp_path, monkeypatch):
             athena_workgroup='primary',
             athena_output_s3='s3://bucket/prefix',
             athena_profile_name='payer-sso',
+            athena_account_id='898272807559',
             athena_region='us-east-1',
         )
     )
@@ -32,11 +44,12 @@ def test_memory_store_create_and_upsert(tmp_path, monkeypatch):
     assert project.aws_profile_name == 'dev-sso'
     assert project.account_id == '123456789012'
     assert project.athena_database == 'cur_db'
+    assert project.athena_account_id == '898272807559'
     assert memory_file.exists()
 
 
-def test_memory_store_list_projects_sorted(tmp_path, monkeypatch):
-    data_dir = tmp_path / 'data'
+def test_memory_store_list_projects_sorted(monkeypatch):
+    data_dir = _case_dir("memory_store_list_projects_sorted") / 'data'
     memory_file = data_dir / 'project_memory.json'
 
     monkeypatch.setattr(store, 'DATA_DIR', data_dir)
@@ -48,8 +61,8 @@ def test_memory_store_list_projects_sorted(tmp_path, monkeypatch):
     assert store.list_projects() == ['alpha', 'zeta']
 
 
-def test_memory_store_touch_project_updates_last_used(tmp_path, monkeypatch):
-    data_dir = tmp_path / 'data'
+def test_memory_store_touch_project_updates_last_used(monkeypatch):
+    data_dir = _case_dir("memory_store_touch_project_updates") / 'data'
     memory_file = data_dir / 'project_memory.json'
 
     monkeypatch.setattr(store, 'DATA_DIR', data_dir)
@@ -66,8 +79,8 @@ def test_memory_store_touch_project_updates_last_used(tmp_path, monkeypatch):
     assert second.updated_at >= first.updated_at
 
 
-def test_memory_store_ignores_legacy_edp_field(tmp_path, monkeypatch):
-    data_dir = tmp_path / 'data'
+def test_memory_store_ignores_legacy_edp_field(monkeypatch):
+    data_dir = _case_dir("memory_store_legacy_field") / 'data'
     memory_file = data_dir / 'project_memory.json'
 
     monkeypatch.setattr(store, 'DATA_DIR', data_dir)
@@ -83,3 +96,4 @@ def test_memory_store_ignores_legacy_edp_field(tmp_path, monkeypatch):
     assert project is not None
     assert project.project_name == 'legacy'
     assert project.athena_database == 'db'
+    assert project.athena_account_id == ''

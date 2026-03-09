@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 
 from app.core.types import NatRecommendationRow
 
 
-NAT_ACTIVITY_PERIOD_SECONDS = 3600
+NAT_ACTIVITY_PERIOD_SECONDS = 21600
 SIX_MONTH_DAYS = 183
 TWO_MONTH_DAYS = 61
 
@@ -50,6 +51,17 @@ class NatGatewayScanSummary:
     nat_gateway_idle_2m_count: int
     nat_metric_error_count: int
     nat_metric_error_samples: list[str]
+
+
+def _activity_period_seconds() -> int:
+    raw = (os.getenv("NAT_METRIC_PERIOD_SECONDS", "") or "").strip()
+    if not raw:
+        return NAT_ACTIVITY_PERIOD_SECONDS
+    try:
+        parsed = int(raw)
+    except Exception:
+        return NAT_ACTIVITY_PERIOD_SECONDS
+    return max(300, parsed)
 
 
 def list_regions(sess) -> list[str]:
@@ -124,6 +136,7 @@ def _collect_nat_metric_series(
     end_time: datetime,
 ) -> dict[str, tuple[list[datetime], list[float]]]:
     start_time = end_time - timedelta(days=SIX_MONTH_DAYS)
+    period_seconds = _activity_period_seconds()
     queries = [
         {
             "Id": "bytesdest",
@@ -133,7 +146,7 @@ def _collect_nat_metric_series(
                     "MetricName": "BytesOutToDestination",
                     "Dimensions": [{"Name": "NatGatewayId", "Value": nat_gateway_id}],
                 },
-                "Period": NAT_ACTIVITY_PERIOD_SECONDS,
+                "Period": period_seconds,
                 "Stat": "Sum",
             },
             "ReturnData": True,
@@ -146,7 +159,7 @@ def _collect_nat_metric_series(
                     "MetricName": "BytesOutToSource",
                     "Dimensions": [{"Name": "NatGatewayId", "Value": nat_gateway_id}],
                 },
-                "Period": NAT_ACTIVITY_PERIOD_SECONDS,
+                "Period": period_seconds,
                 "Stat": "Sum",
             },
             "ReturnData": True,
@@ -159,7 +172,7 @@ def _collect_nat_metric_series(
                     "MetricName": "ActiveConnectionCount",
                     "Dimensions": [{"Name": "NatGatewayId", "Value": nat_gateway_id}],
                 },
-                "Period": NAT_ACTIVITY_PERIOD_SECONDS,
+                "Period": period_seconds,
                 "Stat": "Maximum",
             },
             "ReturnData": True,

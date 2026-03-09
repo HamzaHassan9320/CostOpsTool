@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "profiles": {
+    "CostOptimization_ReadOnly_Master-898272807559": {
+      "profile_name": "CostOptimization_ReadOnly_Master-898272807559",
+      "sso_start_url": "https://sc-master.awsapps.com/start/#/?tab=accounts",
+      "sso_region": "us-east-1",
+      "preferred_role_name": "CostOptimization_ReadOnly_Master",
+      "default_account_id": "898272807559",
+      "default_region": "eu-west-1",
+      "created_at": "2026-03-09T00:22:50.270739+00:00",
+      "updated_at": "2026-03-09T00:22:50.270739+00:00",
+      "last_used_at": "2026-03-09T00:22:50.270739+00:00"
+    },
+    "CostOptimizationHub_ReadOnly-546377338878": {
+      "profile_name": "CostOptimizationHub_ReadOnly-546377338878",
+      "sso_start_url": "https://sc-master.awsapps.com/start",
+      "sso_region": "us-east-1",
+      "preferred_role_name": "CostOptimizationHub_ReadOnly",
+      "default_account_id": "546377338878",
+      "default_region": "eu-west-1",
+      "created_at": "2026-03-09T02:55:35.073562+00:00",
+      "updated_at": "2026-03-09T02:55:35.073562+00:00",
+      "last_used_at": "2026-03-09T02:55:35.073562+00:00"
+    }
+  }
+}

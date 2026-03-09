@@ -1,0 +1,14 @@
+[profile untouched]
+region = us-east-1
+output = json
+
+[profile dev-sso]
+region = eu-west-1
+custom_key = keep
+sso_session = costops-dev-sso
+
+[sso-session costops-dev-sso]
+sso_start_url = https://d-example.awsapps.com/start
+sso_region = eu-west-1
+sso_registration_scopes = sso:account:access
+
